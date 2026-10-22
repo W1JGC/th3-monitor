@@ -1,70 +1,90 @@
 #!/home/cray/.th3-venv/bin/python
-"""Poll the Inkbird IBS-TH3 via the Tuya Cloud API and append one row to log.csv.
+"""Sync the Inkbird IBS-TH3's ACTUAL cloud reports into log.csv.
 
-The IBS-TH3 is a Tuya-based device (the "INKBIRD" app is a reskinned Tuya app),
-so we read it through Tuya's official Cloud API using tinytuya. Credentials live
-in ~/.config/th3/secrets.env (NOT in the repo). See README for one-time setup.
+The sensor is a battery sleeper that pushes a reading on its own schedule
+(hourly by default, or every N min if configured) — NOT when we poll. So we
+read the device's report log (getdevicelog), which carries each reading's real
+report timestamp, and append any report we haven't logged yet, stamped with the
+DEVICE's time. This gives one row per genuine reading, correctly timed, with no
+poll-time duplicates no matter how often cron runs.
 
-CSV columns: utc_iso,temp_f,humidity_pct  (matches the clock monitor's shape)
+CSV columns: utc_iso,temp_f,humidity_pct   (utc_iso = the sensor's report time)
+Only reports at/after ~/.config/th3/start_after are logged (lets us start the
+chart at a chosen moment without backfilling older data).
 """
-import os, csv, sys, datetime, pathlib
+import os, csv, sys, time, datetime, pathlib
 import tinytuya
 
-CFG = pathlib.Path(os.path.expanduser("~/.config/th3/secrets.env"))
-LOG = pathlib.Path(__file__).resolve().parent / "log.csv"
+CFG   = pathlib.Path(os.path.expanduser("~/.config/th3/secrets.env"))
+FLOOR = pathlib.Path(os.path.expanduser("~/.config/th3/start_after"))
+LOG   = pathlib.Path(__file__).resolve().parent / "log.csv"
+LOOKBACK_H = 26          # pull this many hours of report history each run
+PAIR_MS    = 120_000     # max gap to pair a temp report with a humidity report
 
 def load_env(p):
+    if not p.exists(): sys.exit(f"Missing {p}.")
     d = {}
-    if not p.exists():
-        sys.exit(f"Missing {p}. Copy secrets.env.example there and fill it in.")
     for ln in p.read_text().splitlines():
         ln = ln.strip()
         if ln and not ln.startswith("#") and "=" in ln:
             k, v = ln.split("=", 1); d[k.strip()] = v.strip()
     return d
 
-def c_to_f(c): return c * 9/5 + 32
+def iso(ms):  # epoch ms -> UTC iso like 2026-10-22T21:00:17Z
+    return datetime.datetime.fromtimestamp(ms/1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def main():
     e = load_env(CFG)
-    cloud = tinytuya.Cloud(
-        apiRegion=e.get("TUYA_REGION", "us"),
-        apiKey=e["TUYA_ACCESS_ID"],
-        apiSecret=e["TUYA_ACCESS_SECRET"],
-        apiDeviceID=e["TUYA_DEVICE_ID"],
-    )
-    status = cloud.getstatus(e["TUYA_DEVICE_ID"])
-    if not status or "result" not in status:
-        sys.exit(f"Tuya API returned no data: {status}")
+    floor_ms = 0
+    if FLOOR.exists():
+        try: floor_ms = int(FLOOR.read_text().strip()) * 1000
+        except ValueError: pass
 
-    # Tuya datapoints (DP codes) vary by firmware; accept the common ones.
-    dps = {d["code"]: d["value"] for d in status["result"]}
-    def pick(*codes):
-        for c in codes:
-            if c in dps: return dps[c]
-        return None
-    temp = pick("temp_current", "va_temperature", "temperature", "temp")
-    humi = pick("humidity_value", "va_humidity", "humidity", "humi")
-    if temp is None and humi is None:
-        sys.exit(f"No temp/humidity DP found. Available: {list(dps)}")
+    cloud = tinytuya.Cloud(apiRegion=e.get("TUYA_REGION","us"),
+                           apiKey=e["TUYA_ACCESS_ID"], apiSecret=e["TUYA_ACCESS_SECRET"],
+                           apiDeviceID=e["TUYA_DEVICE_ID"])
+    dev = e["TUYA_DEVICE_ID"]
+    end = int(time.time()*1000); start = end - LOOKBACK_H*3600*1000
+    log = cloud.getdevicelog(dev, start=start, end=end, evtype="7", size=500)
+    try:
+        items = log["result"]["logs"]
+    except (TypeError, KeyError):
+        sys.exit(f"device log unavailable: {str(log)[:200]}")
 
-    # Tuya ALWAYS reports these DPs as 0.1-unit integers (105 = 10.5, 60 = 6.0,
-    # 649 = 64.9), so always divide by 10. (An earlier "scale only if >100"
-    # heuristic silently mis-read low fridge temps: 60 -> 60C -> 140F.)
-    traw = temp / 10.0 if temp is not None else None   # device reports Celsius
-    h    = round(humi / 10.0, 1) if humi is not None else ""
-    if e.get("TUYA_TEMP_UNIT", "C").upper() == "F":
-        tF = round(traw, 1) if traw is not None else ""   # device already in F
-    else:
-        tF = round(c_to_f(traw), 1) if traw is not None else ""
+    temps = sorted((it["event_time"], int(it["value"])) for it in items if it.get("code")=="va_temperature")
+    hums  = sorted((it["event_time"], int(it["value"])) for it in items if it.get("code")=="va_humidity")
+    if not temps:
+        print("no temperature reports in window"); return
 
-    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    new = not LOG.exists()
+    to_f = (lambda c10: round(c10/10, 1)) if e.get("TUYA_TEMP_UNIT","C").upper()=="F" \
+           else (lambda c10: round(c10/10*9/5+32, 1))
+
+    # pair each temperature report with the nearest humidity report
+    rows = {}
+    for tt, tv in temps:
+        if tt < floor_ms: continue
+        h = min(hums, key=lambda x: abs(x[0]-tt), default=None)
+        hv = round(h[1]/10, 1) if (h and abs(h[0]-tt) <= PAIR_MS) else ""
+        rows[iso(tt)] = (to_f(tv), hv)
+
+    # dedupe against what's already logged
+    existing = set()
+    if LOG.exists():
+        with open(LOG) as f:
+            for r in csv.reader(f):
+                if r and r[0] != "utc_iso": existing.add(r[0])
+    new = sorted(ts for ts in rows if ts not in existing)
+    if not new:
+        print("no new reports to log"); return
+
+    need_header = not LOG.exists() or LOG.stat().st_size == 0
     with open(LOG, "a", newline="") as f:
         w = csv.writer(f)
-        if new: w.writerow(["utc_iso", "temp_f", "humidity_pct"])
-        w.writerow([now, tF, h])
-    print(f"{now}  temp_f={tF}  humidity_pct={h}")
+        if need_header: w.writerow(["utc_iso","temp_f","humidity_pct"])
+        for ts in new:
+            t, h = rows[ts]; w.writerow([ts, t, h])
+    print(f"logged {len(new)} new report(s): " +
+          ", ".join(f"{ts} {rows[ts][0]}F/{rows[ts][1]}%" for ts in new[-5:]))
 
 if __name__ == "__main__":
     main()
