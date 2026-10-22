@@ -48,15 +48,15 @@ def main():
     if temp is None and humi is None:
         sys.exit(f"No temp/humidity DP found. Available: {list(dps)}")
 
-    # Tuya reports temp in 0.1-unit integers (e.g. 231 = 23.1). Scale if large.
-    def scale(v):
-        return v/10.0 if isinstance(v, (int, float)) and abs(v) > 100 else v
-    tC = scale(temp) if temp is not None else None
-    tF = round(c_to_f(tC), 1) if tC is not None else ""
-    # If the device is configured in °F, Tuya may already report F; heuristic:
-    if e.get("TUYA_TEMP_UNIT", "C").upper() == "F" and tC is not None:
-        tF = round(scale(temp), 1)
-    h  = round(scale(humi), 1) if humi is not None else ""
+    # Tuya ALWAYS reports these DPs as 0.1-unit integers (105 = 10.5, 60 = 6.0,
+    # 649 = 64.9), so always divide by 10. (An earlier "scale only if >100"
+    # heuristic silently mis-read low fridge temps: 60 -> 60C -> 140F.)
+    traw = temp / 10.0 if temp is not None else None   # device reports Celsius
+    h    = round(humi / 10.0, 1) if humi is not None else ""
+    if e.get("TUYA_TEMP_UNIT", "C").upper() == "F":
+        tF = round(traw, 1) if traw is not None else ""   # device already in F
+    else:
+        tF = round(c_to_f(traw), 1) if traw is not None else ""
 
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     new = not LOG.exists()
