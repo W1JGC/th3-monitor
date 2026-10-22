@@ -69,7 +69,7 @@ DP found", paste me the list of DP codes it prints and I'll map them.
 3. Schedule the poller (matches the clock's cron):
    ```
    crontab -e
-   */10 * * * * /home/cray/.local/bin/th3_push.sh >> /home/cray/.local/state/th3_push.log 2>&1
+   */2 * * * * /home/cray/.local/bin/th3_push.sh >> /home/cray/.local/state/th3_push.log 2>&1
    ```
 
 ## Notes
