@@ -67,26 +67,24 @@ def main():
         hv = round(h[1]/10, 1) if (h and abs(h[0]-tt) <= PAIR_MS) else ""
         rows[iso(tt)] = (to_f(tv), hv)
 
-    # dedupe against what's already logged
-    existing = set()
+    # dedupe against what's already logged; track the last kept (time, temp) so we
+    # can drop Tuya's occasional repeat of the same reading a second or two later.
+    def _p(ts): return datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+    existing = set(); last_dt = None; last_tmp = None
     if LOG.exists():
         with open(LOG) as f:
             for r in csv.reader(f):
-                if r and r[0] != "utc_iso": existing.add(r[0])
-    import datetime as _dt
-    def _p(ts): return _dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
-    last = max((_p(ts) for ts in existing), default=None)
-    last_t = None
+                if r and r[0] != "utc_iso":
+                    existing.add(r[0])
+                    dt = _p(r[0])
+                    if last_dt is None or dt > last_dt: last_dt, last_tmp = dt, r[1]
     new = []
     for ts in sorted(rows):
         if ts in existing: continue
-        tdt = _p(ts)
-        # skip a report within 30s of the prior kept one with the same temp (Tuya log dupe)
-        if last and (tdt-last).total_seconds() < 30 and new and rows[ts][0]==rows[new[-1]][0]:
-            continue
-        if last_t and (tdt-last_t).total_seconds() < 30 and rows[ts][0]==last_t_val:
-            continue
-        new.append(ts); last_t=tdt; last_t_val=rows[ts][0]
+        tdt = _p(ts); tmp = str(rows[ts][0])
+        if last_dt and (tdt - last_dt).total_seconds() < 30 and tmp == str(last_tmp):
+            continue   # same reading repeated within 30s -> Tuya log dupe
+        new.append(ts); last_dt, last_tmp = tdt, tmp
     if not new:
         print("no new reports to log"); return
 
