@@ -73,7 +73,20 @@ def main():
         with open(LOG) as f:
             for r in csv.reader(f):
                 if r and r[0] != "utc_iso": existing.add(r[0])
-    new = sorted(ts for ts in rows if ts not in existing)
+    import datetime as _dt
+    def _p(ts): return _dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+    last = max((_p(ts) for ts in existing), default=None)
+    last_t = None
+    new = []
+    for ts in sorted(rows):
+        if ts in existing: continue
+        tdt = _p(ts)
+        # skip a report within 30s of the prior kept one with the same temp (Tuya log dupe)
+        if last and (tdt-last).total_seconds() < 30 and new and rows[ts][0]==rows[new[-1]][0]:
+            continue
+        if last_t and (tdt-last_t).total_seconds() < 30 and rows[ts][0]==last_t_val:
+            continue
+        new.append(ts); last_t=tdt; last_t_val=rows[ts][0]
     if not new:
         print("no new reports to log"); return
 
