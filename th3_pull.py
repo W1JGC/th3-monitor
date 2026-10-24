@@ -67,35 +67,37 @@ def main():
         hv = round(h[1]/10, 1) if (h and abs(h[0]-tt) <= PAIR_MS) else ""
         rows[iso(tt)] = (to_f(tv), hv)
 
-    # dedupe against what's already logged; track the last kept (time, temp) so we
-    # can drop Tuya's occasional repeat of the same reading a second or two later.
+    # Merge newly-pulled reports with everything already logged, then dedupe and
+    # sort and rewrite the whole file. (Append-only breaks when a report is re-pulled
+    # out of order, so we rebuild each run; the file is small.) `merged` keeps older
+    # rows beyond the pull window untouched.
     def _p(ts): return datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
-    existing = set(); last_dt = None; last_tmp = None
+    merged = {}
     if LOG.exists():
         with open(LOG) as f:
             for r in csv.reader(f):
-                if r and r[0] != "utc_iso":
-                    existing.add(r[0])
-                    dt = _p(r[0])
-                    if last_dt is None or dt > last_dt: last_dt, last_tmp = dt, r[1]
-    new = []
-    for ts in sorted(rows):
-        if ts in existing: continue
-        tdt = _p(ts); tmp = str(rows[ts][0])
-        if last_dt and (tdt - last_dt).total_seconds() < 30 and tmp == str(last_tmp):
-            continue   # same reading repeated within 30s -> Tuya log dupe
-        new.append(ts); last_dt, last_tmp = tdt, tmp
-    if not new:
-        print("no new reports to log"); return
+                if r and r[0] != "utc_iso" and len(r) >= 3:
+                    merged[r[0]] = (r[1], r[2])
+    before = len(merged)
+    merged.update(rows)                         # add/refresh pulled reports
 
-    need_header = not LOG.exists() or LOG.stat().st_size == 0
-    with open(LOG, "a", newline="") as f:
-        w = csv.writer(f)
-        if need_header: w.writerow(["utc_iso","temp_f","humidity_pct"])
-        for ts in new:
-            t, h = rows[ts]; w.writerow([ts, t, h])
-    print(f"logged {len(new)} new report(s): " +
-          ", ".join(f"{ts} {rows[ts][0]}F/{rows[ts][1]}%" for ts in new[-5:]))
+    # drop a reading repeated within 30s of the prior kept one at the same temp
+    out = []; last_dt = None; last_tmp = None
+    for ts in sorted(merged):
+        tdt = _p(ts); tmp = str(merged[ts][0])
+        if last_dt and (tdt - last_dt).total_seconds() < 30 and tmp == last_tmp:
+            continue
+        out.append(ts); last_dt, last_tmp = tdt, tmp
+
+    with open(LOG, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["utc_iso", "temp_f", "humidity_pct"])
+        for ts in out:
+            t, h = merged[ts]; w.writerow([ts, t, h])
+    added = len(out) - before
+    if added > 0:
+        print(f"{added} new report(s); {len(out)} rows total (last: {out[-1]} {merged[out[-1]][0]}F/{merged[out[-1]][1]}%)")
+    else:
+        print(f"no new reports; {len(out)} rows total")
 
 if __name__ == "__main__":
     main()
