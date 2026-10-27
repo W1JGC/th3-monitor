@@ -97,7 +97,13 @@ function drawChart(canvasId, rows, key, color, unit){
 
   const pad = {l:48, r:10, t:12, b:24};
   const x0 = pts[0].t, x1 = pts[pts.length-1].t;
-  let y0 = Math.min(...pts.map(r=>r[key])), y1 = Math.max(...pts.map(r=>r[key]));
+  // Scale to the bulk of the data (Tukey fences), not raw min/max, so door-open
+  // spikes don't squash the real dry-aging range. Spikes clip to the top edge.
+  const vals = pts.map(r=>r[key]).sort((a,b)=>a-b);
+  const q = p => vals[Math.max(0, Math.min(vals.length-1, Math.round(p*(vals.length-1))))];
+  const q1=q(0.25), q3=q(0.75), iqr=q3-q1;
+  let y0 = Math.max(vals[0], q1 - 1.5*iqr);
+  let y1 = Math.min(vals[vals.length-1], q3 + 1.5*iqr);
   if (y0===y1){ y0-=1; y1+=1; }
   const my=(y1-y0)*0.12; y0-=my; y1+=my;
   const px = t => pad.l + (t-x0)/(x1-x0||1)*(W-pad.l-pad.r);
@@ -126,11 +132,14 @@ function drawChart(canvasId, rows, key, color, unit){
   }
   g.fillStyle=C.lab; g.textBaseline="top"; g.fillText(unit, pad.l, 0);
 
+  g.save();   // clip the series to the plot box so clipped spikes don't draw over axes
+  g.beginPath(); g.rect(pad.l, pad.t, W-pad.l-pad.r, H-pad.t-pad.b); g.clip();
   g.strokeStyle=color; g.lineWidth=1.3; g.beginPath();
   pts.forEach((r,i)=>{ const X=px(r.t), Y=py(r[key]); i?g.lineTo(X,Y):g.moveTo(X,Y); });
   g.stroke();
   g.fillStyle=color;
   for (const r of pts){ g.beginPath(); g.arc(px(r.t),py(r[key]),2.2,0,7); g.fill(); }
+  g.restore();
 }
 
 async function refresh(){
