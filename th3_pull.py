@@ -65,6 +65,7 @@ def main():
         if tt < floor_ms: continue
         h = min(hums, key=lambda x: abs(x[0]-tt), default=None)
         hv = round(h[1]/10, 1) if (h and abs(h[0]-tt) <= PAIR_MS) else ""
+        if hv != "" and hv < 10: hv = ""   # sensor glitch (reads 0% when wet)
         rows[iso(tt)] = (to_f(tv), hv)
 
     # Merge newly-pulled reports with everything already logged, then dedupe and
