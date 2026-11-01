@@ -1,0 +1,11 @@
+log.csv.new
+secrets.env
+preview.png
+th3_live.png
+report_interval.log
+exp_*
+report_interval.log
+log_full_*.csv
+log_pre_*.csv
+log_precleared_*.csv
+log_settling_*.csv
